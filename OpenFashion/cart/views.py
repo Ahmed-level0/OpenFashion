@@ -8,6 +8,8 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ModelViewSet
+from django.db import transaction
+from orders.models import Order, OrderItem
 
 class CartViewset(ModelViewSet):
     """
@@ -72,11 +74,91 @@ class CartViewset(ModelViewSet):
             return Response(CartItemSerializer(cart_item).data)
         else:
             return Response({'error': 'Item not found'}, status=status.HTTP_404_NOT_FOUND)
-    
-    def check_out(self, request):
+        
+            
+    # Safe checkout
+    @action(detail=False, methods=['post'])
+    def checkout(self, request):
         user = self.request.user
         user_id = self.request.user.id
 
         (cart, created) = Cart.objects.get_or_create(user_id=user_id)
-        
-            
+
+        if cart.items.count() == 0:
+            return Response({"error": "Cart is empty"}, status=400)
+
+        phone = request.data.get('phone')
+        address = request.data.get('address')
+        # payment_method = request.data.get('payment_method', 'online')
+
+        if not phone or not address:
+            return Response({"error": "Phone and address required"}, status=400)
+
+        # shipping_fee = 50 if city in ['cairo', 'giza'] else 80
+        # cod_fee = float(cart.total_price) * 0.10 if payment_method == 'cod' else 0
+
+        # Compute discount safely
+        # discount_amount = 0
+        # if cart.coupon and cart.coupon.is_valid:
+        #     items_total = sum(item.total_price for item in cart.items.select_related('product'))
+        #     if cart.coupon.discount_type == 'percentage':
+        #         discount_amount = items_total * cart.coupon.discount / 100
+        #     else:
+        #         discount_amount = min(cart.coupon.discount, items_total)
+
+        # Start atomic transaction for order creation & stock deduction
+        with transaction.atomic():
+            # Lock all products involved to prevent race conditions
+            products = Product.objects.filter(id__in=cart.items.values_list('product_id', flat=True)).select_for_update()
+
+            # Verify stock
+            for item in cart.items.select_related('product'):
+                if item.quantity > item.product.stock:
+                    return Response(
+                        {"error": f"Not enough stock for {item.product.name}. Only {item.product.stock} left"},
+                        status=409
+                    )
+
+            # Create order
+            order = Order.objects.create(
+                user=request.user,
+                total_price=float(cart.get_total_price()),
+                total_quantity=cart.get_total_quantity(),
+                # shipping_fee=shipping_fee,
+                # coupon=cart.coupon,
+                # discount_amount=discount_amount,
+                phone=phone,
+                address=address,
+                status='pending'
+            )
+
+            # Create order items
+            for item in cart.items.select_related('product'):
+                OrderItem.objects.create(
+                    order=order,
+                    product=item.product,
+                    quantity=item.quantity,
+                    price=item.product.price
+                )
+
+            # Deduct stock immediately for COD
+            # if order.status == 'cod':
+            #     for item in order.items.select_related('product'):
+            #         item.product.stock = F('stock') - item.quantity
+            #         item.product.save()
+
+            # Update coupon usage count safely
+            # if cart.coupon:
+            #     coupon = Coupon.objects.select_for_update().get(id=cart.coupon.id)
+            #     coupon.usage_count = F('usage_count') + 1
+            #     coupon.save()
+
+            cart.items.all().delete()
+            cart.save()
+
+        message = "Order created. Payment required." if order.status == 'pending' else "Order placed successfully"
+        return Response({
+            "order_id": order.id,
+            "message": message,
+            "status": order.status
+        }, status=201)
