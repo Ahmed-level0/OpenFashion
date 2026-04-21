@@ -1,13 +1,16 @@
-from rest_framework.generics import ListAPIView, RetrieveAPIView
 from .models import Product
 from .serializers import ProductSerializer
+from rest_framework.viewsets import ModelViewSet
+from .permissions import IsAdminOrReadOnly
 
-
-class ProductListAPIView(ListAPIView):
-    queryset = Product.objects.select_related('category').all()
+class ProductViewset(ModelViewSet):
+    """
+    A viewset for viewing and editing product instances.
+    """
     serializer_class = ProductSerializer
+    permission_classes = [IsAdminOrReadOnly]
 
-class ProductDetailAPIView(RetrieveAPIView):
-    queryset = Product.objects.select_related('category').all()
-    serializer_class = ProductSerializer
-    lookup_field = 'id'
+    def get_queryset(self):
+        return Product.objects.select_related('category').all()
+
+    
